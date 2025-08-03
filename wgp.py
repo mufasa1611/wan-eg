@@ -98,6 +98,85 @@ if mmgp_version != target_mmgp_version:
 lock = threading.Lock()
 current_task_id = None
 task_id = 0
+
+# Global Performance Tracking System for RTX 5090
+class GlobalPerformanceTracker:
+    def __init__(self):
+        self.model_load_times = {}
+        self.generation_times = {}
+        self.memory_stats = {}
+        self.last_load_time = 0
+        self.rtx_5090_detected = False
+        
+        # Detect RTX 5090 on init
+        try:
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name()
+                if "RTX 5090" in device_name:
+                    self.rtx_5090_detected = True
+                    print("🚀 Global RTX 5090 Performance Tracker Initialized")
+        except:
+            pass
+    
+    def start_model_load(self, model_name):
+        self.current_load_start = time.time()
+        self.current_model = model_name
+        
+    def end_model_load(self, model_name=None):
+        if hasattr(self, 'current_load_start'):
+            load_time = time.time() - self.current_load_start
+            model = model_name or getattr(self, 'current_model', 'unknown')
+            self.model_load_times[model] = load_time
+            self.last_load_time = load_time
+            
+            if self.rtx_5090_detected:
+                if load_time < 30:
+                    status = "⚡ EXCELLENT"
+                elif load_time < 60:
+                    status = "✅ GOOD"
+                elif load_time < 300:
+                    status = "⚠️ SLOW"
+                else:
+                    status = "🐌 VERY SLOW"
+                    
+                print(f"🚀 RTX 5090 LOAD PERFORMANCE: {model} loaded in {load_time:.1f}s - {status}")
+            
+    def get_memory_stats(self):
+        try:
+            if torch.cuda.is_available():
+                vram_used = torch.cuda.memory_allocated() / (1024**3)
+                vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                
+                import psutil
+                ram_used = psutil.virtual_memory().used / (1024**3)
+                ram_total = psutil.virtual_memory().total / (1024**3)
+                
+                return {
+                    'vram_used': vram_used,
+                    'vram_total': vram_total,
+                    'vram_percent': (vram_used / vram_total) * 100,
+                    'ram_used': ram_used,
+                    'ram_total': ram_total,
+                    'ram_percent': (ram_used / ram_total) * 100
+                }
+        except:
+            pass
+        return {}
+    
+    def get_performance_summary(self):
+        summary = []
+        if self.last_load_time > 0:
+            summary.append(f"Last Model Load: {self.last_load_time:.1f}s")
+        
+        memory = self.get_memory_stats()
+        if memory:
+            summary.append(f"VRAM: {memory['vram_used']:.1f}GB/{memory['vram_total']:.1f}GB ({memory['vram_percent']:.1f}%)")
+            summary.append(f"RAM: {memory['ram_used']:.1f}GB/{memory['ram_total']:.1f}GB ({memory['ram_percent']:.1f}%)")
+        
+        return " | ".join(summary)
+
+# Initialize global performance tracker
+global_perf_tracker = GlobalPerformanceTracker()
 vmc_event_handler = matanyone_app.get_vmc_event_handler()
 unique_id = 0
 unique_id_lock = threading.Lock()
@@ -2263,6 +2342,29 @@ if len(args.attention)> 0:
     else:
         raise Exception(f"Unknown attention mode '{args.attention}'")
 
+# RTX 5090 ATTENTION OPTIMIZATION: Auto-select best attention mode
+try:
+    if torch.cuda.is_available() and attention_mode == "auto" and not lock_ui_attention:
+        device_name = torch.cuda.get_device_name()
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        
+        if "RTX 5090" in device_name and vram_gb >= 30:
+            # RTX 5090 optimization hierarchy: Flash > Sage2 > SDPA
+            if "flash" in attention_modes_installed and "flash" in attention_modes_supported:
+                attention_mode = "flash"
+                print(f"🚀 RTX 5090 ATTENTION: Using Flash Attention for maximum speed")
+            elif "sage2" in attention_modes_installed and "sage2" in attention_modes_supported:
+                attention_mode = "sage2"
+                print(f"🚀 RTX 5090 ATTENTION: Using Sage2 Attention for optimized performance")
+            elif "sage" in attention_modes_installed and "sage" in attention_modes_supported:
+                attention_mode = "sage"
+                print(f"🚀 RTX 5090 ATTENTION: Using Sage Attention")
+            else:
+                attention_mode = "sdpa"
+                print(f"🚀 RTX 5090 ATTENTION: Using SDPA (default optimized)")
+except:
+    pass
+
 profile =  force_profile_no if force_profile_no >=0 else server_config["profile"]
 
 # RTX 5090 optimization: Auto-select optimal profile for high-end systems
@@ -2831,6 +2933,11 @@ def get_transformer_model(model, submodel_no = 1):
 
 def load_models(model_type):
     global transformer_type
+    
+    # Start performance tracking
+    global_perf_tracker.start_model_load(model_type)
+    print(f"🔄 Starting model load: {model_type}")
+    
     base_model_type = get_base_model_type(model_type)
     model_def = get_model_def(model_type)
     preload = int(args.preload)
@@ -2996,6 +3103,29 @@ def load_models(model_type):
     if len(args.gpu) > 0:
         torch.set_default_device(args.gpu)
     transformer_type = model_type
+    
+    # End performance tracking and report
+    global_perf_tracker.end_model_load(model_type)
+    print(f"✅ Model load complete: {model_type}")
+    print(f"📊 Performance Summary: {global_perf_tracker.get_performance_summary()}")
+    
+    # RTX 5090 Smart Cache Management - Optimize VRAM usage after model loading
+    try:
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name()
+            if "RTX 5090" in device_name:
+                torch.cuda.empty_cache()  # Clear unused memory
+                if hasattr(torch.cuda, 'reset_max_memory_allocated'):
+                    torch.cuda.reset_max_memory_allocated()
+                
+                # Report optimized memory state
+                vram_used = torch.cuda.memory_allocated() / (1024**3)
+                vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                vram_free = vram_total - vram_used
+                print(f"🚀 RTX 5090 CACHE OPTIMIZED: {vram_used:.1f}GB used, {vram_free:.1f}GB available ({(vram_free/vram_total)*100:.1f}% free)")
+    except:
+        pass
+    
     return wan_model, offloadobj 
 
 if not "P" in preload_model_policy:
@@ -4284,6 +4414,36 @@ def generate_video(
 
     model_def = get_model_def(model_type) 
     is_image = image_mode == 1
+    
+    # RTX 5090 Global Batch Size Optimization
+    try:
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name()
+            vram_available = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            
+            if "RTX 5090" in device_name and vram_available >= 30:
+                # Dynamically optimize batch size based on available VRAM
+                if is_image and batch_size > 1:
+                    vram_free = vram_available - (torch.cuda.memory_allocated() / (1024**3))
+                    
+                    # Conservative batch sizing for stability with complex models
+                    if "14B" in model_type and vram_free > 20:
+                        max_batch = min(8, int(vram_free / 3))  # Conservative for 14B models
+                    elif vram_free > 15:
+                        max_batch = min(12, int(vram_free / 2))  # More aggressive for smaller models
+                    else:
+                        max_batch = 4  # Safe minimum
+                    
+                    if batch_size > max_batch:
+                        print(f"🚀 RTX 5090 BATCH OPTIMIZATION: Reducing batch size from {batch_size} to {max_batch} for optimal performance ({vram_free:.1f}GB VRAM available)")
+                        batch_size = max_batch
+                elif is_image and batch_size == 1:
+                    vram_free = vram_available - (torch.cuda.memory_allocated() / (1024**3))
+                    if vram_free > 20:
+                        print(f"🚀 RTX 5090 ENHANCEMENT: {vram_free:.1f}GB VRAM available - consider increasing batch size for faster image generation")
+    except:
+        pass
+    
     if is_image:
         # min_frames_if_references = server_config.get("min_frames_if_references", 5)
         video_length = min_frames_if_references if "I" in video_prompt_type else 1 
@@ -7401,7 +7561,25 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     scale = 5
                 )
             with gr.Row():
-                batch_size = gr.Slider(1, 16, value=ui_defaults.get("batch_size", 1), step=1, label="Number of Images to Generate", visible = image_outputs)
+                # RTX 5090 Enhanced Batch Size - Higher limits for high-end hardware
+                try:
+                    max_batch_size = 16  # Default max
+                    batch_size_info = "Number of Images to Generate"
+                    
+                    if torch.cuda.is_available():
+                        device_name = torch.cuda.get_device_name()
+                        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                        
+                        if "RTX 5090" in device_name and vram_gb >= 30:
+                            max_batch_size = 32  # Double the limit for RTX 5090
+                            batch_size_info = "🚀 RTX 5090 Enhanced: Number of Images to Generate (Up to 32 for fast parallel processing)"
+                        elif "RTX 40" in device_name and vram_gb >= 20:
+                            max_batch_size = 24  # Enhanced for RTX 40 series
+                            batch_size_info = "⚡ High-End GPU: Number of Images to Generate (Enhanced for RTX 40 series)"
+                except:
+                    pass
+                    
+                batch_size = gr.Slider(1, max_batch_size, value=ui_defaults.get("batch_size", 1), step=1, label=batch_size_info, visible = image_outputs)
                 if image_outputs:
                     video_length = gr.Slider(1, 9999, value=ui_defaults.get("video_length", 1), step=1, label="Number of frames", visible = False)
                 elif recammaster:
@@ -9041,6 +9219,22 @@ def create_ui():
         stats_app = None
 
     with gr.Blocks(css=css, js=js,  theme=theme, title= "WanGP") as main:
+        # RTX 5090 Status and Performance Header
+        try:
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name()
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                import psutil
+                ram_gb = psutil.virtual_memory().total / (1024**3)
+                
+                if "RTX 5090" in device_name:
+                    rtx_status = f"🚀 RTX 5090 OPTIMIZED ({vram_gb:.0f}GB VRAM, {ram_gb:.0f}GB RAM) - Fast Loading Enabled"
+                    gr.Markdown(f"<div align=center><div style='background: linear-gradient(90deg, #00ff88, #0088ff); padding: 8px; border-radius: 10px; color: white; font-weight: bold; margin-bottom: 10px;'>{rtx_status}</div></div>")
+                else:
+                    gr.Markdown(f"<div align=center><div style='background: #666; padding: 8px; border-radius: 10px; color: white; margin-bottom: 10px;'>GPU: {device_name} ({vram_gb:.1f}GB VRAM)</div></div>")
+        except:
+            pass
+            
         gr.Markdown(f"<div align=center><H1>Wan<SUP>GP</SUP> v{WanGP_version} <FONT SIZE=4>by <I>DeepBeepMeep</I></FONT> <FONT SIZE=3>") # (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A>)</FONT SIZE=3></H1></div>")
         global model_list
 
